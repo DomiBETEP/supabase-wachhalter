@@ -1,0 +1,84 @@
+# Haelt ein Supabase-Projekt im kostenlosen Tarif wach.
+#
+# Supabase pausiert Projekte im Free-Plan nach sieben Tagen ohne Aktivitaet.
+# Fuer eine App, die noch wenige Nutzer hat, heisst das: Die Anmeldung steht
+# eines Morgens still, der Name loest nicht mehr auf, und in der App kommt
+# "keine Verbindung" an - obwohl das Netz laeuft.
+#
+# WARUM EINE TABELLENABFRAGE UND KEIN PING: gemessen ueber den
+# Transaktionszaehler der Datenbank (pg_stat_database), je fuenf Aufrufe
+# gegen ein Grundrauschen von zwei Transaktionen pro Messpaar:
+#
+#     5x GET  /auth/v1/health                     +0 Transaktionen
+#     5x POST /auth/v1/token (ungueltiges Token)  +1 Transaktion
+#     5x GET  /rest/v1/<tabelle>                  +7 Transaktionen
+#
+# Ein Health-Ping beruehrt die Datenbank ueberhaupt nicht. Ein Wachhalter,
+# der nur pingt, waere womoeglich wirkungslos - und das faellt erst auf, wenn
+# das Projekt trotzdem einschlaeft.
+#
+# Supabase schreibt nirgends auf, was genau als "Aktivitaet" zaehlt. Ein
+# Aufruf ueber PostgREST ist zugleich eine API-Anfrage UND eine
+# Datenbanktransaktion und faellt damit unter beide denkbaren Masstaebe.
+#
+# WARUM DIESES VERZEICHNIS OEFFENTLICH IST: Fuer oeffentliche Verzeichnisse
+# sind GitHub Actions unbegrenzt frei. In einem privaten Verzeichnis haengt
+# schon dieser winzige Lauf am Ausgabenlimit des Kontos.
+#
+# EINRICHTUNG - zwei Secrets unter Settings > Secrets and variables > Actions:
+#   SUPABASE_URL        https://<projekt>.supabase.co
+#   SUPABASE_ANON_KEY   der anon-Schluessel (nicht der service_role-Schluessel)
+#   SUPABASE_TABELLE    Name einer Tabelle, die anon lesen darf
+#
+# Der anon-Schluessel ist nicht geheim - er steht in jedem ausgelieferten
+# Client. Der service_role-Schluessel gehoert NIEMALS hierher.
+name: Supabase wachhalten
+
+on:
+  schedule:
+    # Alle zwei Tage um 06:00 UTC. Bei sieben Tagen Frist duerfen also drei
+    # Laeufe ausfallen, bevor es eng wird - Luft genug fuer eine Stoerung bei
+    # GitHub, ohne dass gleich das Projekt einschlaeft.
+    - cron: "0 6 */2 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  anklopfen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Tabelle abfragen und Antwort pruefen
+        env:
+          URL: ${{ secrets.SUPABASE_URL }}
+          ANON: ${{ secrets.SUPABASE_ANON_KEY }}
+          TABELLE: ${{ secrets.SUPABASE_TABELLE }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${URL:-}" ] || [ -z "${ANON:-}" ] || [ -z "${TABELLE:-}" ]; then
+            echo "::error::SUPABASE_URL, SUPABASE_ANON_KEY oder SUPABASE_TABELLE fehlt in den Secrets."
+            exit 1
+          fi
+
+          # --max-time, damit ein haengendes Supabase den Laeufer nicht bis zum
+          # Zeitlimit belegt. --retry deckt eine einzelne Stoerung ab, ohne
+          # einen echten Ausfall zu verschleiern.
+          status=$(curl -s -o antwort.json -w "%{http_code}" \
+            --max-time 30 --retry 2 --retry-delay 5 \
+            -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
+            "$URL/rest/v1/$TABELLE?select=*&limit=1")
+
+          echo "HTTP-Status: $status"
+
+          if [ "$status" != "200" ]; then
+            echo "::error::Supabase antwortete mit $status statt 200."
+            echo "::error::Bei 000 loest der Name nicht auf - dann ist das Projekt"
+            echo "::error::bereits pausiert und muss im Dashboard wieder gestartet"
+            echo "::error::werden (Restore). Die Daten sind dabei nicht verloren."
+            exit 1
+          fi
+
+          echo "Das Projekt ist wach."
