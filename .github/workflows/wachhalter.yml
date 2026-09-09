@@ -1,84 +1,141 @@
-# Haelt ein Supabase-Projekt im kostenlosen Tarif wach.
+# Haelt Supabase-Projekte im kostenlosen Tarif wach.
 #
-# Supabase pausiert Projekte im Free-Plan nach sieben Tagen ohne Aktivitaet.
-# Fuer eine App, die noch wenige Nutzer hat, heisst das: Die Anmeldung steht
-# eines Morgens still, der Name loest nicht mehr auf, und in der App kommt
-# "keine Verbindung" an - obwohl das Netz laeuft.
+# Die Logik steht in wachhalten.sh - dort auch die Begruendung, warum es
+# mehrere Anfragen pro Tag und einen Rueckfall braucht.
 #
-# WARUM EINE TABELLENABFRAGE UND KEIN PING: gemessen ueber den
-# Transaktionszaehler der Datenbank (pg_stat_database), je fuenf Aufrufe
-# gegen ein Grundrauschen von zwei Transaktionen pro Messpaar:
-#
-#     5x GET  /auth/v1/health                     +0 Transaktionen
-#     5x POST /auth/v1/token (ungueltiges Token)  +1 Transaktion
-#     5x GET  /rest/v1/<tabelle>                  +7 Transaktionen
-#
-# Ein Health-Ping beruehrt die Datenbank ueberhaupt nicht. Ein Wachhalter,
-# der nur pingt, waere womoeglich wirkungslos - und das faellt erst auf, wenn
-# das Projekt trotzdem einschlaeft.
-#
-# Supabase schreibt nirgends auf, was genau als "Aktivitaet" zaehlt. Ein
-# Aufruf ueber PostgREST ist zugleich eine API-Anfrage UND eine
-# Datenbanktransaktion und faellt damit unter beide denkbaren Masstaebe.
-#
-# WARUM DIESES VERZEICHNIS OEFFENTLICH IST: Fuer oeffentliche Verzeichnisse
-# sind GitHub Actions unbegrenzt frei. In einem privaten Verzeichnis haengt
-# schon dieser winzige Lauf am Ausgabenlimit des Kontos.
-#
-# EINRICHTUNG - zwei Secrets unter Settings > Secrets and variables > Actions:
+# EINRICHTUNG - Settings > Secrets and variables > Actions:
 #   SUPABASE_URL        https://<projekt>.supabase.co
-#   SUPABASE_ANON_KEY   der anon-Schluessel (nicht der service_role-Schluessel)
+#   SUPABASE_ANON_KEY   der anon-Schluessel (NIEMALS der service_role-Schluessel)
 #   SUPABASE_TABELLE    Name einer Tabelle, die anon lesen darf
 #
-# Der anon-Schluessel ist nicht geheim - er steht in jedem ausgelieferten
-# Client. Der service_role-Schluessel gehoert NIEMALS hierher.
+# WEITERE PROJEKTE: dieselben drei Secrets mit _2 bis _5 am Ende, also
+# SUPABASE_URL_2, SUPABASE_ANON_KEY_2, SUPABASE_TABELLE_2 und so fort. Am
+# Workflow ist dafuer nichts zu aendern.
+#
+# ACHTUNG, Kontingent: Der kostenlose Tarif erlaubt hoechstens ZWEI aktive
+# Projekte, gezaehlt ueber alle Organisationen, in denen du Eigentuemer oder
+# Administrator bist. Ein drittes Projekt pausiert Supabase unabhaengig von
+# jeder Aktivitaet - dagegen hilft kein Wachhalter, nur ein Tarif.
 name: Supabase wachhalten
 
 on:
   schedule:
-    # Alle zwei Tage um 06:00 UTC. Bei sieben Tagen Frist duerfen also drei
-    # Laeufe ausfallen, bevor es eng wird - Luft genug fuer eine Stoerung bei
-    # GitHub, ohne dass gleich das Projekt einschlaeft.
-    - cron: "0 6 */2 * *"
+    # Zweimal taeglich, zu krummen Minuten. Zur vollen Stunde starten bei
+    # GitHub Millionen Zeitplaene gleichzeitig; geplante Laeufe verspaeten
+    # sich dann um Stunden oder fallen ganz aus. Der erste Wachhalter war
+    # auf 06:00 UTC gesetzt und lief tatsaechlich zwischen 09:34 und 11:59.
+    #
+    # Zwei Laeufe pro Tag heisst ausserdem: Faellt einer bei GitHub aus,
+    # traegt der andere den Tag. Bei einem Lauf alle zwei Tage riss jeder
+    # Ausfall ein Loch von vier Tagen.
+    - cron: "23 5 * * *"
+    - cron: "47 17 * * *"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # fuer den Lebenszeichen-Commit weiter unten
+  issues: write     # um bei Stille ein Issue zu oeffnen
+
+concurrency:
+  group: wachhalter
+  cancel-in-progress: false
 
 jobs:
   anklopfen:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
-      - name: Tabelle abfragen und Antwort pruefen
+      - uses: actions/checkout@v5
+
+      - name: An alle Projekte anklopfen
+        id: anklopfen
         env:
-          URL: ${{ secrets.SUPABASE_URL }}
-          ANON: ${{ secrets.SUPABASE_ANON_KEY }}
-          TABELLE: ${{ secrets.SUPABASE_TABELLE }}
+          SB_URL_1: ${{ secrets.SUPABASE_URL }}
+          SB_KEY_1: ${{ secrets.SUPABASE_ANON_KEY }}
+          SB_TAB_1: ${{ secrets.SUPABASE_TABELLE }}
+          SB_URL_2: ${{ secrets.SUPABASE_URL_2 }}
+          SB_KEY_2: ${{ secrets.SUPABASE_ANON_KEY_2 }}
+          SB_TAB_2: ${{ secrets.SUPABASE_TABELLE_2 }}
+          SB_URL_3: ${{ secrets.SUPABASE_URL_3 }}
+          SB_KEY_3: ${{ secrets.SUPABASE_ANON_KEY_3 }}
+          SB_TAB_3: ${{ secrets.SUPABASE_TABELLE_3 }}
+          SB_URL_4: ${{ secrets.SUPABASE_URL_4 }}
+          SB_KEY_4: ${{ secrets.SUPABASE_ANON_KEY_4 }}
+          SB_TAB_4: ${{ secrets.SUPABASE_TABELLE_4 }}
+          SB_URL_5: ${{ secrets.SUPABASE_URL_5 }}
+          SB_KEY_5: ${{ secrets.SUPABASE_ANON_KEY_5 }}
+          SB_TAB_5: ${{ secrets.SUPABASE_TABELLE_5 }}
+        run: bash wachhalten.sh
+
+      # Laeuft auch, wenn oben etwas rot war: Der Schutz gegen GitHubs
+      # 60-Tage-Abschaltung darf nicht davon abhaengen, dass Supabase
+      # gerade mitspielt.
+      - name: Lebenszeichen ins Verzeichnis schreiben
+        if: always()
         run: |
           set -euo pipefail
 
-          if [ -z "${URL:-}" ] || [ -z "${ANON:-}" ] || [ -z "${TABELLE:-}" ]; then
-            echo "::error::SUPABASE_URL, SUPABASE_ANON_KEY oder SUPABASE_TABELLE fehlt in den Secrets."
-            exit 1
+          # GitHub deaktiviert geplante Workflows in Verzeichnissen, in denen
+          # 60 Tage lang nichts passiert - lautlos, ohne roten Lauf. Ein
+          # Commit setzt diese Frist zurueck. Nicht taeglich, sonst ertraenkt
+          # der Wachhalter die Vorgeschichte in 365 Commits pro Jahr.
+          letzter=$(git log -1 --format=%ct)
+          jetzt=$(date -u +%s)
+          tage=$(( (jetzt - letzter) / 86400 ))
+
+          echo "Letzte Aenderung vor $tage Tagen."
+
+          if [ "$tage" -lt 14 ]; then
+            echo "Noch weit vor der 60-Tage-Grenze, kein Commit noetig."
+            exit 0
           fi
 
-          # --max-time, damit ein haengendes Supabase den Laeufer nicht bis zum
-          # Zeitlimit belegt. --retry deckt eine einzelne Stoerung ab, ohne
-          # einen echten Ausfall zu verschleiern.
-          status=$(curl -s -o antwort.json -w "%{http_code}" \
-            --max-time 30 --retry 2 --retry-delay 5 \
-            -H "apikey: $ANON" -H "Authorization: Bearer $ANON" \
-            "$URL/rest/v1/$TABELLE?select=*&limit=1")
+          date -u '+%Y-%m-%d %H:%M UTC' > lebenszeichen.txt
+          git config user.name "Wachhalter"
+          git config user.email "dominik.neutraubling@gmx.de"
+          git add lebenszeichen.txt
+          git commit -m "Lebenszeichen - haelt den Zeitplan bei GitHub aktiv"
+          git push
 
-          echo "HTTP-Status: $status"
+      # E-Mails von GitHub gehen leicht unter. Ein Issue bleibt stehen, bis
+      # es jemand schliesst.
+      # Ausdruecklich am Anklopf-Schritt festgemacht, nicht an failure():
+      # sonst oeffnet ein gescheiterter Push weiter oben ein Issue, das von
+      # unerreichbaren Projekten spricht, obwohl alle wach sind.
+      - name: Bei Stille ein Issue oeffnen
+        if: always() && steps.anklopfen.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
 
-          if [ "$status" != "200" ]; then
-            echo "::error::Supabase antwortete mit $status statt 200."
-            echo "::error::Bei 000 loest der Name nicht auf - dann ist das Projekt"
-            echo "::error::bereits pausiert und muss im Dashboard wieder gestartet"
-            echo "::error::werden (Restore). Die Daten sind dabei nicht verloren."
-            exit 1
+          offen=$(gh issue list --label wachhalter --state open --json number --jq 'length')
+          if [ "$offen" -gt 0 ]; then
+            echo "Es steht schon ein Issue offen - kein zweites."
+            exit 0
           fi
 
-          echo "Das Projekt ist wach."
+          gh label create wachhalter --color B60205 \
+            --description "Der Wachhalter kommt nicht durch" 2>/dev/null || true
+
+          # Heredoc statt eingerueckter Zeichenkette: Fuehrende Leerzeichen
+          # wuerden im Issue als Markdown-Codeblock ankommen.
+          cat > /tmp/meldung.md <<MELDUNG
+          Der Wachhalter konnte mindestens ein Supabase-Projekt nicht erreichen.
+
+          Ohne Aktivitaet pausiert Supabase das Projekt nach etwa einer Woche.
+          Es bleibt also Zeit, aber nicht beliebig viel.
+
+          Das Protokoll sagt, was zu tun ist:
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          - **Name loest nicht auf** - das Projekt ist bereits pausiert und muss im Supabase-Dashboard wiederhergestellt werden.
+          - **anon-Schluessel wird abgelehnt** - Schluessel in den Secrets erneuern.
+          - **Ersatztabelle hat gegriffen** - SUPABASE_TABELLE zeigt auf eine Tabelle, die es nicht mehr gibt. Das Projekt bleibt vorerst wach, aber das gehoert repariert.
+
+          Dieses Issue wurde vom Wachhalter selbst geoeffnet und darf nach der Reparatur geschlossen werden.
+          MELDUNG
+
+          gh issue create --label wachhalter \
+            --title "Wachhalter kommt nicht durch" \
+            --body-file /tmp/meldung.md
